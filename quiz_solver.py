@@ -1,31 +1,27 @@
-import anthropic
 import json
 import re
-from typing import Dict, Any, List, Optional
+import requests
+from typing import Dict, Any, Optional
+import os
 
 class QuizSolver:
-    """Advanced quiz solving with Claude"""
+    """Advanced quiz solving using AI Pipe (OpenAI-compatible proxy)"""
     
-    def __init__(self, api_key: str):
-        self.client = anthropic.Anthropic(api_key=api_key)
+    def __init__(self):
+        self.api_key = os.environ.get("OPENAI_API_KEY")
+        self.base_url = os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openai/v1")
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
     
     def solve_quiz(self, quiz_content: Dict[str, Any], files_data: Optional[Dict] = None) -> Dict[str, Any]:
         """Main method to solve a quiz"""
-        
-        # Build comprehensive prompt
         prompt = self._build_prompt(quiz_content, files_data)
-        
-        # Get Claude's response
-        response = self._call_claude(prompt)
-        
-        # Parse and validate response
+        response = self._call_aipipe(prompt)
         solution = self._parse_response(response)
-        
         return solution
     
     def _build_prompt(self, quiz_content: Dict, files_data: Optional[Dict] = None) -> str:
-        """Build a comprehensive prompt for Claude"""
-        
+        """Build a comprehensive prompt for the model"""
         prompt_parts = [
             "You are an expert data analyst solving a quiz. Analyze carefully and provide accurate answers.",
             "",
@@ -33,7 +29,7 @@ class QuizSolver:
             quiz_content.get('text', ''),
             "",
             "=== QUIZ HTML ===",
-            quiz_content.get('html', '')[:3000],  # Truncate to avoid token limits
+            quiz_content.get('html', '')[:3000],
         ]
         
         if files_data:
@@ -63,78 +59,72 @@ class QuizSolver:
             "}",
             "",
             "CRITICAL RULES:",
-            "- answer must match the expected data type (number for sums, string for text, etc.)",
-            "- extract submit_url exactly as shown in the quiz page",
+            "- answer must match the expected data type",
+            "- extract submit_url exactly as shown",
             "- if files are needed but not yet provided, list them in files_needed",
             "- if files are provided, analyze them and give the final answer",
-            "- return ONLY valid JSON, no markdown formatting or extra text"
+            "- return ONLY valid JSON"
         ])
         
         return "\n".join(prompt_parts)
     
-    def _call_claude(self, prompt: str, max_retries: int = 2) -> str:
-        """Call Claude API with retry logic"""
+    def _call_aipipe(self, prompt: str, max_retries: int = 2) -> str:
+        """Call AI Pipe API (OpenAI-compatible) with retries"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": "gpt-5-nano",
+            "input": prompt
+        }
         
         for attempt in range(max_retries):
             try:
-                message = self.client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=4096,
-                    temperature=0.1,  # Lower temperature for more consistent answers
-                    messages=[{
-                        "role": "user",
-                        "content": prompt
-                    }]
-                )
+                resp = requests.post(f"{self.base_url}/responses", headers=headers, json=data, timeout=180)
+                resp.raise_for_status()
+                result = resp.json()
                 
-                return message.content[0].text
+                # Extract text from AI Pipe response
+                output_text = ""
+                if "output" in result:
+                    for item in result["output"]:
+                        for c in item.get("content", []):
+                            output_text += c.get("text", "")
+                return output_text
             
             except Exception as e:
                 if attempt == max_retries - 1:
                     raise
-                print(f"Claude API error (attempt {attempt + 1}): {e}")
+                print(f"AI Pipe API error (attempt {attempt + 1}): {e}")
                 continue
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
-        """Parse Claude's response into structured format"""
-        
-        # Remove markdown code blocks if present
+        """Parse model's response into structured JSON"""
         response = re.sub(r'```json\s*', '', response)
         response = re.sub(r'```\s*', '', response)
         
-        # Try to find JSON object
         try:
-            # Find first { and last }
             start = response.find('{')
             end = response.rfind('}') + 1
-            
             if start == -1 or end == 0:
-                return {
-                    "error": "No JSON found in response",
-                    "raw_response": response
-                }
+                return {"error": "No JSON found", "raw_response": response}
             
             json_str = response[start:end]
             result = json.loads(json_str)
             
-            # Validate required fields
             if 'submit_url' not in result:
                 result['error'] = "Missing submit_url"
-            
             if 'answer' not in result and 'files_needed' not in result:
                 result['error'] = "Missing both answer and files_needed"
             
             return result
         
         except json.JSONDecodeError as e:
-            return {
-                "error": f"JSON parse error: {str(e)}",
-                "raw_response": response
-            }
+            return {"error": f"JSON parse error: {str(e)}", "raw_response": response}
     
     def analyze_files(self, quiz_content: Dict, files_data: Dict) -> Dict[str, Any]:
         """Analyze downloaded files to answer the quiz"""
-        
         prompt_parts = [
             "You are analyzing files to answer a data quiz.",
             "",
@@ -143,10 +133,9 @@ class QuizSolver:
             "",
             "=== FILES PROVIDED ===",
         ]
-        
         for file_url, file_info in files_data.items():
             prompt_parts.extend([
-                f"",
+                "",
                 f"File: {file_url}",
                 f"Type: {file_info.get('type', 'unknown')}",
                 f"Content preview: {str(file_info.get('content', ''))[:1000]}",
@@ -156,10 +145,6 @@ class QuizSolver:
             "",
             "=== YOUR TASK ===",
             "Analyze the file(s) and answer the question precisely.",
-            "If the question asks for a sum, calculate the exact sum.",
-            "If it asks for a count, count accurately.",
-            "If it asks for specific data, extract it correctly.",
-            "",
             "Respond with ONLY valid JSON:",
             "{",
             '  "reasoning": "how you analyzed the data",',
@@ -168,12 +153,11 @@ class QuizSolver:
             "}"
         ])
         
-        response = self._call_claude("\n".join(prompt_parts))
+        response = self._call_aipipe("\n".join(prompt_parts))
         return self._parse_response(response)
     
     def handle_visualization(self, data: Any, viz_type: str) -> str:
         """Generate visualization if needed"""
-        
         prompt = f"""Generate a {viz_type} visualization for this data:
 
 {json.dumps(data, indent=2)}
@@ -182,18 +166,16 @@ Return a JSON object with:
 {{
   "chart_type": "{viz_type}",
   "data_for_chart": {{"x": [...], "y": [...]}},
-  "base64_image": "data:image/png;base64,..." 
+  "base64_image": "data:image/png;base64,..."
 }}
 
 If you cannot generate the image, describe what the chart should show.
 """
-        
-        response = self._call_claude(prompt)
+        response = self._call_aipipe(prompt)
         return self._parse_response(response)
     
     def validate_answer(self, answer: Any, expected_type: str) -> bool:
         """Validate answer matches expected type"""
-        
         type_mapping = {
             'number': (int, float),
             'string': str,
@@ -201,9 +183,7 @@ If you cannot generate the image, describe what the chart should show.
             'object': dict,
             'array': list
         }
-        
         expected = type_mapping.get(expected_type)
         if expected is None:
-            return True  # Unknown type, allow it
-        
+            return True
         return isinstance(answer, expected)
