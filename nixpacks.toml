@@ -1,9 +1,12 @@
 [phases.setup]
-nixPkgs = ["ffmpeg"]
-aptPkgs = ["chromium", "chromium-driver"]
+# Nix packages
+nixPkgs = ["ffmpeg", "chromium"]
+# Ubuntu packages via apt
+aptPkgs = ["chromium-driver", "libnss3", "libxss1", "libasound2", "libatk1.0-0", "libgtk-3-0", "libx11-xcb1", "libxcomposite1", "libxdamage1", "libxrandr2"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
 
 [start]
+# Start the Flask app with Gunicorn, 2 workers, 300s timeout
 cmd = "gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 300 --worker-class sync"
