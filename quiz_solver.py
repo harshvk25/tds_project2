@@ -1,25 +1,48 @@
 import json
 import re
-import requests
-from typing import Dict, Any, Optional
 import os
+from typing import Dict, Any, Optional
+import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 class QuizSolver:
     """Advanced quiz solving using AI Pipe (OpenAI-compatible proxy)"""
-    
+
     def __init__(self):
-        self.api_key = os.environ.get("OPENAI_API_KEY")
+        self.api_key = os.environ.get("AIPIPE_TOKEN")
         self.base_url = os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openai/v1")
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
-    
+            raise ValueError("AIPIPE_TOKEN environment variable is not set")
+
+    # ---------------------------
+    # Fetch fully rendered HTML using Selenium
+    # ---------------------------
+    def fetch_js_rendered_page(self, url: str) -> str:
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        driver.get(url)
+        html = driver.page_source
+        driver.quit()
+        return html
+
+    # ---------------------------
+    # Solve quiz
+    # ---------------------------
     def solve_quiz(self, quiz_content: Dict[str, Any], files_data: Optional[Dict] = None) -> Dict[str, Any]:
         """Main method to solve a quiz"""
         prompt = self._build_prompt(quiz_content, files_data)
         response = self._call_aipipe(prompt)
         solution = self._parse_response(response)
         return solution
-    
+
+    # ---------------------------
+    # Build AI prompt
+    # ---------------------------
     def _build_prompt(self, quiz_content: Dict, files_data: Optional[Dict] = None) -> str:
         """Build a comprehensive prompt for the model"""
         prompt_parts = [
@@ -31,14 +54,14 @@ class QuizSolver:
             "=== QUIZ HTML ===",
             quiz_content.get('html', '')[:3000],
         ]
-        
+
         if files_data:
             prompt_parts.extend([
                 "",
                 "=== DOWNLOADED FILES ===",
                 f"Available files: {list(files_data.keys())}",
             ])
-        
+
         prompt_parts.extend([
             "",
             "=== YOUR TASK ===",
@@ -65,9 +88,12 @@ class QuizSolver:
             "- if files are provided, analyze them and give the final answer",
             "- return ONLY valid JSON"
         ])
-        
+
         return "\n".join(prompt_parts)
-    
+
+    # ---------------------------
+    # Call AI Pipe
+    # ---------------------------
     def _call_aipipe(self, prompt: str, max_retries: int = 2) -> str:
         """Call AI Pipe API (OpenAI-compatible) with retries"""
         headers = {
@@ -78,13 +104,13 @@ class QuizSolver:
             "model": "gpt-5-nano",
             "input": prompt
         }
-        
+
         for attempt in range(max_retries):
             try:
                 resp = requests.post(f"{self.base_url}/responses", headers=headers, json=data, timeout=180)
                 resp.raise_for_status()
                 result = resp.json()
-                
+
                 # Extract text from AI Pipe response
                 output_text = ""
                 if "output" in result:
@@ -92,37 +118,43 @@ class QuizSolver:
                         for c in item.get("content", []):
                             output_text += c.get("text", "")
                 return output_text
-            
+
             except Exception as e:
                 if attempt == max_retries - 1:
                     raise
                 print(f"AI Pipe API error (attempt {attempt + 1}): {e}")
                 continue
-    
+
+    # ---------------------------
+    # Parse AI response into JSON
+    # ---------------------------
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """Parse model's response into structured JSON"""
         response = re.sub(r'```json\s*', '', response)
         response = re.sub(r'```\s*', '', response)
-        
+
         try:
             start = response.find('{')
             end = response.rfind('}') + 1
             if start == -1 or end == 0:
                 return {"error": "No JSON found", "raw_response": response}
-            
+
             json_str = response[start:end]
             result = json.loads(json_str)
-            
+
             if 'submit_url' not in result:
                 result['error'] = "Missing submit_url"
             if 'answer' not in result and 'files_needed' not in result:
                 result['error'] = "Missing both answer and files_needed"
-            
+
             return result
-        
+
         except json.JSONDecodeError as e:
             return {"error": f"JSON parse error: {str(e)}", "raw_response": response}
-    
+
+    # ---------------------------
+    # Analyze files if any
+    # ---------------------------
     def analyze_files(self, quiz_content: Dict, files_data: Dict) -> Dict[str, Any]:
         """Analyze downloaded files to answer the quiz"""
         prompt_parts = [
@@ -140,7 +172,7 @@ class QuizSolver:
                 f"Type: {file_info.get('type', 'unknown')}",
                 f"Content preview: {str(file_info.get('content', ''))[:1000]}",
             ])
-        
+
         prompt_parts.extend([
             "",
             "=== YOUR TASK ===",
@@ -152,10 +184,13 @@ class QuizSolver:
             '  "answer": <precise answer>',
             "}"
         ])
-        
+
         response = self._call_aipipe("\n".join(prompt_parts))
         return self._parse_response(response)
-    
+
+    # ---------------------------
+    # Generate visualizations if needed
+    # ---------------------------
     def handle_visualization(self, data: Any, viz_type: str) -> str:
         """Generate visualization if needed"""
         prompt = f"""Generate a {viz_type} visualization for this data:
@@ -173,7 +208,10 @@ If you cannot generate the image, describe what the chart should show.
 """
         response = self._call_aipipe(prompt)
         return self._parse_response(response)
-    
+
+    # ---------------------------
+    # Validate answer type
+    # ---------------------------
     def validate_answer(self, answer: Any, expected_type: str) -> bool:
         """Validate answer matches expected type"""
         type_mapping = {
