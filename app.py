@@ -11,7 +11,7 @@ app = Flask(__name__)
 # ---------------------------
 STUDENT_EMAIL = os.environ.get("STUDENT_EMAIL")
 STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
-API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("AIPIPE_TOKEN")
+API_KEY = os.environ.get("AIPIPE_TOKEN")
 
 client = OpenAI(
     api_key=API_KEY,
