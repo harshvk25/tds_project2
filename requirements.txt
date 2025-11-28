@@ -11,6 +11,6 @@ openpyxl==3.1.2
 PyPDF2==3.0.1
 python-dotenv==1.0.0
 beautifulsoup4==4.12.2
-lxml==4.9.3
+lxml>=4.9.3 ; python_version < '3.13'
 SpeechRecognition==3.10.0
 pydub==0.25.1
