@@ -4,15 +4,16 @@ import requests
 import pandas as pd
 from flask import Flask, request, jsonify
 from openai import OpenAI
+from playwright.sync_api import sync_playwright
 import time
 import base64
 from io import BytesIO
 
 app = Flask(__name__)
 
-# ---------------------------
-# Load environment variables
-# ---------------------------
+# --------------------------------------
+# Load environment variables from Render
+# --------------------------------------
 STUDENT_EMAIL = os.environ.get("STUDENT_EMAIL")
 STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
 API_KEY = os.environ.get("AIPIPE_TOKEN")
@@ -22,157 +23,178 @@ client = OpenAI(
     base_url="https://aipipe.org/openai/v1"
 )
 
-# ---------------------------
-# Helper: call AI
-# ---------------------------
+# --------------------------------------
+# AI call
+# --------------------------------------
 def call_ai(prompt):
     try:
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2
         )
-        return response.choices[0].message.content
+        return resp.choices[0].message.content
     except Exception as e:
         print("AI ERROR:", e)
         return None
 
-# ---------------------------
-# Fetch quiz (NO PLAYWRIGHT)
-# ---------------------------
+# --------------------------------------
+# Fetch JS-rendered quiz page
+# --------------------------------------
 def fetch_quiz(url):
     try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=60000)
+            page.wait_for_load_state("networkidle")
+            content = page.evaluate("() => document.body.innerText")
+            browser.close()
+
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                print("Failed to parse JSON from page")
+                return None
+
     except Exception as e:
-        print("Error fetching quiz:", e)
+        print("Playwright ERROR:", e)
         return None
 
-# ---------------------------
-# Download & parse files
-# ---------------------------
+# --------------------------------------
+# Download needed files & prepare them
+# --------------------------------------
 def download_and_parse_files(files_needed):
-    parsed = []
+    parsed_files = []
     for f in files_needed:
         try:
-            resp = requests.get(f["url"], timeout=30)
-            resp.raise_for_status()
-            content_bytes = resp.content
-            encoded = base64.b64encode(content_bytes).decode()
+            r = requests.get(f["url"], timeout=30)
+            r.raise_for_status()
+            content_bytes = r.content
+            encoded = base64.b64encode(content_bytes).decode("utf-8")
 
-            preview = None
+            parsed_preview = None
+            # Try CSV
             try:
                 df = pd.read_csv(BytesIO(content_bytes))
-                preview = df.head().to_dict(orient="records")
+                parsed_preview = df.head(10).to_dict(orient="records")
             except:
+                # Try JSON
                 try:
-                    preview = json.loads(content_bytes.decode("utf-8"))
+                    parsed_preview = json.loads(content_bytes.decode())
                 except:
-                    preview = None
+                    parsed_preview = None
 
-            parsed.append({
+            parsed_files.append({
                 "filename": f.get("filename", "unknown"),
-                "content_base64": encoded,
                 "type": f.get("type", "unknown"),
-                "parsed_preview": preview
+                "content_base64": encoded,
+                "parsed_preview": parsed_preview
             })
+
         except Exception as e:
-            print("File download error:", e)
+            print(f"File download failed: {f['url']}", e)
 
-    return parsed
+    return parsed_files
 
-# ---------------------------
-# AI Quiz Solver
-# ---------------------------
-def solve_quiz_with_ai(quiz_data):
-    context = "\n".join(
-        [quiz_data.get("text", "")] +
-        [f"[{l['type']}] {l['url']}" for l in quiz_data.get("all_links", [])]
-    )
+# --------------------------------------
+# Solve quiz using AI
+# --------------------------------------
+def solve_quiz_with_ai(quiz):
+    context = quiz.get("text", "")
+    links = "\n".join(f"{l['type']}: {l['url']}" for l in quiz.get("all_links", []))
 
-    files_needed = quiz_data.get("files_needed", [])
-    parsed_files = download_and_parse_files(files_needed)
+    files_needed = quiz.get("files_needed", [])
+    parsed = download_and_parse_files(files_needed)
 
     files_text = "\n".join([
-        f"{f['filename']} (base64): {f['content_base64'][:100]}..., preview: {f['parsed_preview']}"
-        for f in parsed_files
+        f"{f['filename']} (preview: {f['parsed_preview']})"
+        for f in parsed
     ])
 
     prompt = f"""
-You are an AI that solves IITM LLM quiz questions.
-Return JSON ONLY — no markdown or text outside JSON.
+Solve the IITM LLM quiz. Return JSON only.
 
-{{ 
-  "submit_url": "",
-  "reasoning": "",
-  "answer": "",
-  "files_needed": []
-}}
-
-Quiz content:
+Quiz text:
 {context}
+
+Links:
+{links}
 
 Files:
 {files_text}
+
+Return JSON with EXACTLY these fields:
+
+{{
+  "answer": "your final answer",
+  "reasoning": "why you chose it",
+  "files_used": []
+}}
 """
 
-    response = call_ai(prompt)
-    if not response:
+    ai = call_ai(prompt)
+    if not ai:
         return None
 
+    # Extract JSON fragment
     try:
-        start = response.find("{")
-        end = response.rfind("}") + 1
-        return json.loads(response[start:end])
-    except:
+        start = ai.find("{")
+        end = ai.rfind("}") + 1
+        return json.loads(ai[start:end])
+    except Exception as e:
+        print("JSON Parse ERROR:", e)
         return None
 
-# ---------------------------
-# Main Quiz Endpoint
-# ---------------------------
+# --------------------------------------
+# /quiz endpoint
+# --------------------------------------
 @app.route("/quiz", methods=["POST"])
 def quiz():
-    start = time.time()
-    body = request.json
+    start_time = time.time()
 
+    body = request.json
     if not body:
         return jsonify({"error": "Invalid JSON"}), 400
 
+    # Authentication
     if body.get("email") != STUDENT_EMAIL or body.get("secret") != STUDENT_SECRET:
         return jsonify({"error": "Invalid email or secret"}), 403
 
-    url = body.get("url")
-    if not url:
-        return jsonify({"error": "Missing url"}), 400
+    quiz_url = body.get("url")
+    if not quiz_url:
+        return jsonify({"error": "Missing URL"}), 400
 
-    quiz_data = fetch_quiz(url)
-    if not quiz_data:
-        return jsonify({"error": "Failed to fetch quiz"}), 400
+    # Step 1: Fetch quiz
+    quiz = fetch_quiz(quiz_url)
+    if not quiz:
+        return jsonify({"error": "Quiz fetch failed"}), 400
 
-    ai_result = solve_quiz_with_ai(quiz_data)
-    if not ai_result:
-        return jsonify({"error": "AI failed"}), 500
+    # Step 2: Solve quiz
+    result = solve_quiz_with_ai(quiz)
+    if not result:
+        return jsonify({"error": "AI solver failed"}), 500
 
-    if time.time() - start > 180:
-        return jsonify({"error": "Timeout > 3 minutes"}), 500
+    # Time limit
+    if time.time() - start_time > 180:
+        return jsonify({"error": "Timeout (3 minutes exceeded)"}), 500
 
-    try:
-        submit_resp = requests.post(ai_result["submit_url"], json=ai_result, timeout=30)
-        submit_data = submit_resp.json()
-    except Exception as e:
-        submit_data = {"error": "Submission failed", "details": str(e)}
-
+    # Return final AI result only (no external submission!)
     return jsonify({
         "status": "completed",
-        "quiz_result": submit_data,
-        "ai_output": ai_result
+        "ai_output": result
     })
 
+# --------------------------------------
+# Root
+# --------------------------------------
 @app.route("/")
 def home():
     return "Quiz solver is running."
 
+# --------------------------------------
+# Run server
+# --------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
