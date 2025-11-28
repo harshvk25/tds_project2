@@ -1,227 +1,116 @@
 import json
-import re
-import os
-from typing import Dict, Any, Optional
+import base64
 import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+import pandas as pd
+from io import BytesIO
+import os
+from openai import OpenAI
 
-class QuizSolver:
-    """Advanced quiz solving using AI Pipe (OpenAI-compatible proxy)"""
+API_KEY = os.environ.get("AIPIPE_TOKEN")
 
-    def __init__(self):
-        self.api_key = os.environ.get("AIPIPE_TOKEN")
-        self.base_url = os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openai/v1")
-        if not self.api_key:
-            raise ValueError("AIPIPE_TOKEN environment variable is not set")
+client = OpenAI(
+    api_key=API_KEY,
+    base_url="https://aipipe.org/openai/v1"
+)
 
-    # ---------------------------
-    # Fetch fully rendered HTML using Selenium
-    # ---------------------------
-    def fetch_js_rendered_page(self, url: str) -> str:
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.get(url)
-        html = driver.page_source
-        driver.quit()
-        return html
+# -----------------------------------
+# Call AI model
+# -----------------------------------
+def call_ai(prompt):
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        print("AI ERROR:", e)
+        return None
 
-    # ---------------------------
-    # Solve quiz
-    # ---------------------------
-    def solve_quiz(self, quiz_content: Dict[str, Any], files_data: Optional[Dict] = None) -> Dict[str, Any]:
-        """Main method to solve a quiz"""
-        prompt = self._build_prompt(quiz_content, files_data)
-        response = self._call_aipipe(prompt)
-        solution = self._parse_response(response)
-        return solution
+# -----------------------------------
+# Download and parse files
+# -----------------------------------
+def download_and_parse_files(files_needed):
+    parsed = []
 
-    # ---------------------------
-    # Build AI prompt
-    # ---------------------------
-    def _build_prompt(self, quiz_content: Dict, files_data: Optional[Dict] = None) -> str:
-        """Build a comprehensive prompt for the model"""
-        prompt_parts = [
-            "You are an expert data analyst solving a quiz. Analyze carefully and provide accurate answers.",
-            "",
-            "=== QUIZ CONTENT ===",
-            quiz_content.get('text', ''),
-            "",
-            "=== QUIZ HTML ===",
-            quiz_content.get('html', '')[:3000],
-        ]
-
-        if files_data:
-            prompt_parts.extend([
-                "",
-                "=== DOWNLOADED FILES ===",
-                f"Available files: {list(files_data.keys())}",
-            ])
-
-        prompt_parts.extend([
-            "",
-            "=== YOUR TASK ===",
-            "1. Identify what the question is asking",
-            "2. Extract the submission URL from the quiz page",
-            "3. If files are mentioned, list their URLs in 'files_needed'",
-            "4. If you have file data, analyze it to answer the question",
-            "5. Calculate/derive the answer",
-            "6. Format your response as JSON",
-            "",
-            "=== RESPONSE FORMAT ===",
-            "You MUST respond with ONLY a valid JSON object (no other text):",
-            "{",
-            '  "reasoning": "brief explanation of your approach",',
-            '  "submit_url": "URL where answer should be posted",',
-            '  "answer": <the answer - could be number, string, boolean, or object>,',
-            '  "files_needed": ["list of file URLs if any are needed"]',
-            "}",
-            "",
-            "CRITICAL RULES:",
-            "- answer must match the expected data type",
-            "- extract submit_url exactly as shown",
-            "- if files are needed but not yet provided, list them in files_needed",
-            "- if files are provided, analyze them and give the final answer",
-            "- return ONLY valid JSON"
-        ])
-
-        return "\n".join(prompt_parts)
-
-    # ---------------------------
-    # Call AI Pipe
-    # ---------------------------
-    def _call_aipipe(self, prompt: str, max_retries: int = 2) -> str:
-        """Call AI Pipe API (OpenAI-compatible) with retries"""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": "gpt-5-nano",
-            "input": prompt
-        }
-
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(f"{self.base_url}/responses", headers=headers, json=data, timeout=180)
-                resp.raise_for_status()
-                result = resp.json()
-
-                # Extract text from AI Pipe response
-                output_text = ""
-                if "output" in result:
-                    for item in result["output"]:
-                        for c in item.get("content", []):
-                            output_text += c.get("text", "")
-                return output_text
-
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise
-                print(f"AI Pipe API error (attempt {attempt + 1}): {e}")
-                continue
-
-    # ---------------------------
-    # Parse AI response into JSON
-    # ---------------------------
-    def _parse_response(self, response: str) -> Dict[str, Any]:
-        """Parse model's response into structured JSON"""
-        response = re.sub(r'```json\s*', '', response)
-        response = re.sub(r'```\s*', '', response)
-
+    for f in files_needed:
         try:
-            start = response.find('{')
-            end = response.rfind('}') + 1
-            if start == -1 or end == 0:
-                return {"error": "No JSON found", "raw_response": response}
+            r = requests.get(f["url"], timeout=20)
+            r.raise_for_status()
 
-            json_str = response[start:end]
-            result = json.loads(json_str)
+            raw = r.content
+            encoded = base64.b64encode(raw).decode("utf-8")
 
-            if 'submit_url' not in result:
-                result['error'] = "Missing submit_url"
-            if 'answer' not in result and 'files_needed' not in result:
-                result['error'] = "Missing both answer and files_needed"
+            preview = None
+            try:
+                df = pd.read_csv(BytesIO(raw))
+                preview = df.head(10).to_dict(orient="records")
+            except:
+                try:
+                    preview = json.loads(raw.decode("utf-8"))
+                except:
+                    preview = None
 
-            return result
+            parsed.append({
+                "filename": f["filename"],
+                "content_base64": encoded,
+                "type": f["type"],
+                "preview": preview
+            })
 
-        except json.JSONDecodeError as e:
-            return {"error": f"JSON parse error: {str(e)}", "raw_response": response}
+        except Exception as e:
+            print("FILE ERROR:", f["url"], e)
 
-    # ---------------------------
-    # Analyze files if any
-    # ---------------------------
-    def analyze_files(self, quiz_content: Dict, files_data: Dict) -> Dict[str, Any]:
-        """Analyze downloaded files to answer the quiz"""
-        prompt_parts = [
-            "You are analyzing files to answer a data quiz.",
-            "",
-            "=== ORIGINAL QUESTION ===",
-            quiz_content.get('text', ''),
-            "",
-            "=== FILES PROVIDED ===",
-        ]
-        for file_url, file_info in files_data.items():
-            prompt_parts.extend([
-                "",
-                f"File: {file_url}",
-                f"Type: {file_info.get('type', 'unknown')}",
-                f"Content preview: {str(file_info.get('content', ''))[:1000]}",
-            ])
+    return parsed
 
-        prompt_parts.extend([
-            "",
-            "=== YOUR TASK ===",
-            "Analyze the file(s) and answer the question precisely.",
-            "Respond with ONLY valid JSON:",
-            "{",
-            '  "reasoning": "how you analyzed the data",',
-            '  "submit_url": "submission URL from original quiz",',
-            '  "answer": <precise answer>',
-            "}"
-        ])
+# -----------------------------------
+# Main AI Solver
+# -----------------------------------
+def solve_quiz_with_ai(quiz):
+    files_needed = quiz.get("files_needed", [])
+    parsed_files = download_and_parse_files(files_needed)
 
-        response = self._call_aipipe("\n".join(prompt_parts))
-        return self._parse_response(response)
+    context = quiz.get("text", "")
+    link_list = quiz.get("all_links", [])
 
-    # ---------------------------
-    # Generate visualizations if needed
-    # ---------------------------
-    def handle_visualization(self, data: Any, viz_type: str) -> str:
-        """Generate visualization if needed"""
-        prompt = f"""Generate a {viz_type} visualization for this data:
+    links_str = "\n".join([f"- {x['type']}: {x['url']}" for x in link_list])
 
-{json.dumps(data, indent=2)}
+    files_text = "\n".join([
+        f"{f['filename']} (base64 first 100 chars): {f['content_base64'][:100]} preview={f['preview']}"
+        for f in parsed_files
+    ])
 
-Return a JSON object with:
+    prompt = f"""
+You solve IITM TDS LLM quizzes. Return ONLY valid JSON. No markdown.
+
+Quiz text:
+{context}
+
+Links:
+{links_str}
+
+Files:
+{files_text}
+
+Return JSON exactly as:
+
 {{
-  "chart_type": "{viz_type}",
-  "data_for_chart": {{"x": [...], "y": [...]}},
-  "base64_image": "data:image/png;base64,..."
+  "submit_url": "{quiz.get('submit_url', '')}",
+  "reasoning": "",
+  "answer": "your best answer",
+  "files_needed": []
 }}
-
-If you cannot generate the image, describe what the chart should show.
 """
-        response = self._call_aipipe(prompt)
-        return self._parse_response(response)
 
-    # ---------------------------
-    # Validate answer type
-    # ---------------------------
-    def validate_answer(self, answer: Any, expected_type: str) -> bool:
-        """Validate answer matches expected type"""
-        type_mapping = {
-            'number': (int, float),
-            'string': str,
-            'boolean': bool,
-            'object': dict,
-            'array': list
-        }
-        expected = type_mapping.get(expected_type)
-        if expected is None:
-            return True
-        return isinstance(answer, expected)
+    raw = call_ai(prompt)
+    if not raw:
+        return None
+
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        return json.loads(raw[start:end])
+    except Exception as e:
+        print("JSON PARSE ERROR", e)
+        return None
