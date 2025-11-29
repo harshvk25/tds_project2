@@ -5,7 +5,6 @@ import pandas as pd
 from io import BytesIO, StringIO
 import os
 import re
-from openai import OpenAI
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,38 +17,48 @@ AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN")
 if not AIPIPE_TOKEN:
     raise ValueError("AIPIPE_TOKEN environment variable is required")
 
-# Initialize OpenAI client for AIPIPE
-try:
-    client = OpenAI(
-        api_key=AIPIPE_TOKEN,
-        base_url="https://aipipe.org/openai/v1"
-    )
-except TypeError as e:
-    # Fallback for newer OpenAI client versions
-    client = OpenAI(
-        api_key=AIPIPE_TOKEN,
-        base_url="https://aipipe.org/openai/v1"
-    )
-
-# -----------------------------------
-# Call AI model with better error handling
-# -----------------------------------
+# Simple HTTP-based client for AIPIPE (bypasses OpenAI client issues)
 def call_ai(prompt, max_retries=3):
+    """
+    Direct HTTP implementation to call AIPIPE API
+    """
     for attempt in range(max_retries):
         try:
-            resp = client.chat.completions.create(
-                model="gpt-4",  # Using GPT-4 for better reasoning
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=2000
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {AIPIPE_TOKEN}"
+            }
+            
+            payload = {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 2000
+            }
+            
+            response = requests.post(
+                "https://aipipe.org/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60
             )
-            return resp.choices[0].message.content
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+            else:
+                logger.error(f"AIPIPE API error: {response.status_code} - {response.text}")
+                if attempt == max_retries - 1:
+                    return None
+                
         except Exception as e:
             logger.error(f"AIPIPE API error (attempt {attempt + 1}): {e}")
             if attempt == max_retries - 1:
                 return None
             import time
             time.sleep(2)
+    
+    return None
 
 # -----------------------------------
 # Extract information from quiz instructions
