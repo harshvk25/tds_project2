@@ -1,5 +1,8 @@
-flask
-requests
-pandas
-openai==1.13.3
-python-dotenv
+flask==2.3.3
+requests==2.31.0
+playwright==1.40.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+pandas==2.1.3
+openai==1.3.9
+numpy==1.24.3
