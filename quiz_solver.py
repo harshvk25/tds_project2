@@ -18,10 +18,18 @@ AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN")
 if not AIPIPE_TOKEN:
     raise ValueError("AIPIPE_TOKEN environment variable is required")
 
-client = OpenAI(
-    api_key=AIPIPE_TOKEN,
-    base_url="https://aipipe.org/openai/v1"
-)
+# Initialize OpenAI client for AIPIPE
+try:
+    client = OpenAI(
+        api_key=AIPIPE_TOKEN,
+        base_url="https://aipipe.org/openai/v1"
+    )
+except TypeError as e:
+    # Fallback for newer OpenAI client versions
+    client = OpenAI(
+        api_key=AIPIPE_TOKEN,
+        base_url="https://aipipe.org/openai/v1"
+    )
 
 # -----------------------------------
 # Call AI model with better error handling
