@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  quiz-solver:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - STUDENT_EMAIL=${STUDENT_EMAIL}
+      - STUDENT_SECRET=${STUDENT_SECRET}
+      - AIPIPE_TOKEN=${AIPIPE_TOKEN}
+    restart: unless-stopped
