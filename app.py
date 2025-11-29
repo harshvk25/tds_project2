@@ -19,6 +19,10 @@ app = Flask(__name__)
 STUDENT_EMAIL = os.environ.get("STUDENT_EMAIL")
 STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
 
+# Validate required environment variables
+if not STUDENT_EMAIL or not STUDENT_SECRET:
+    logger.error("Missing required environment variables: STUDENT_EMAIL and STUDENT_SECRET must be set")
+
 # -----------------------------------
 # Fetch and render quiz page with JavaScript
 # -----------------------------------
@@ -28,22 +32,27 @@ def fetch_quiz_page(url):
     """
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            # Launch browser in headless mode for Docker
+            browser = p.chromium.launch(headless=True)
             page = browser.new_page()
+            
+            # Set longer timeout for slow pages
+            page.set_default_timeout(30000)
             
             # Navigate to the quiz URL
             page.goto(url, wait_until="networkidle")
             
             # Wait for content to load
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
             
             # Get the fully rendered HTML
             content = page.content()
             
             browser.close()
+            logger.info(f"Successfully fetched quiz page: {url}")
             return content
     except Exception as e:
-        logger.error(f"Error fetching quiz page: {e}")
+        logger.error(f"Error fetching quiz page {url}: {e}")
         return None
 
 # -----------------------------------
@@ -100,9 +109,10 @@ def submit_answer(submit_url, answer_data):
             json=answer_data,
             timeout=30
         )
+        logger.info(f"Submitted answer to {submit_url}, status: {response.status_code}")
         return response.json()
     except Exception as e:
-        logger.error(f"Error submitting answer: {e}")
+        logger.error(f"Error submitting answer to {submit_url}: {e}")
         return {"error": str(e)}
 
 # -----------------------------------
@@ -167,18 +177,19 @@ def quiz():
         submission_result = submit_answer(submit_url, answer_payload)
         
         # Check if we're within time limit
-        if time.time() - start_time > 170:  # 170 seconds for safety margin
-            return jsonify({"error": "Approaching timeout limit"}), 500
+        elapsed_time = time.time() - start_time
+        if elapsed_time > 170:  # 170 seconds for safety margin
+            return jsonify({"error": "Approaching timeout limit", "elapsed_time": elapsed_time}), 500
         
         return jsonify({
             "status": "completed",
             "submission_result": submission_result,
-            "time_elapsed": round(time.time() - start_time, 2),
+            "time_elapsed": round(elapsed_time, 2),
             "quiz_instructions_preview": quiz_data["instructions"][:200] + "..." if len(quiz_data["instructions"]) > 200 else quiz_data["instructions"]
         })
         
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Unexpected error in quiz endpoint: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/")
@@ -191,4 +202,4 @@ def health():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
