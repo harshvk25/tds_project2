@@ -39,7 +39,8 @@ def fetch_quiz_page(url):
             # Set longer timeout for slow pages
             page.set_default_timeout(30000)
             
-            # Navigate to the quiz URL
+            # Navigate to the quiz URL (the one provided in the POST request)
+            logger.info(f"Fetching quiz page: {url}")
             page.goto(url, wait_until="networkidle")
             
             # Wait for content to load
@@ -69,23 +70,43 @@ def parse_quiz_content(html_content):
         # Extract text content - this will contain the quiz instructions
         text_content = soup.get_text(separator='\n', strip=True)
         
-        # Look for submit URL in the content (common patterns)
-        submit_url = None
-        
-        # Method 1: Look for JSON payload in the text that contains submit URL
+        # Look for submit URL in the content
         import re
         url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
         urls = re.findall(url_pattern, text_content)
         
-        # Prioritize URLs that look like submit endpoints
-        for url in urls:
-            if 'submit' in url.lower():
-                submit_url = url
-                break
+        # Find submit URL - look for patterns in the instructions
+        submit_url = None
         
-        # If no submit URL found, use the first URL that's not the quiz URL
-        if not submit_url and urls:
-            submit_url = urls[0]
+        # Method 1: Look for "Post your answer to" or similar patterns
+        if "post your answer to" in text_content.lower():
+            lines = text_content.split('\n')
+            for i, line in enumerate(lines):
+                if "post your answer to" in line.lower() and i + 1 < len(lines):
+                    submit_url = lines[i + 1].strip()
+                    break
+        
+        # Method 2: Look for JSON payload that contains submit URL
+        if not submit_url:
+            json_pattern = r'\{[^}]+\}'
+            json_matches = re.findall(json_pattern, text_content)
+            for json_str in json_matches:
+                try:
+                    data = json.loads(json_str)
+                    if isinstance(data, dict) and 'url' in data:
+                        submit_url = data['url']
+                        break
+                except:
+                    continue
+        
+        # Method 3: Look for URLs containing 'submit'
+        if not submit_url:
+            for url in urls:
+                if 'submit' in url.lower():
+                    submit_url = url
+                    break
+        
+        logger.info(f"Extracted submit URL: {submit_url}")
         
         return {
             "instructions": text_content,
@@ -104,13 +125,29 @@ def submit_answer(submit_url, answer_data):
     Submit the final answer to the specified endpoint
     """
     try:
+        logger.info(f"Submitting answer to: {submit_url}")
+        logger.info(f"Submission data: {answer_data}")
+        
         response = requests.post(
             submit_url,
             json=answer_data,
             timeout=30
         )
-        logger.info(f"Submitted answer to {submit_url}, status: {response.status_code}")
-        return response.json()
+        logger.info(f"Submission response status: {response.status_code}")
+        
+        # Try to parse JSON response
+        try:
+            result = response.json()
+            logger.info(f"Submission response: {result}")
+            return result
+        except json.JSONDecodeError:
+            # If not JSON, return text response
+            logger.warning(f"Non-JSON response: {response.text[:200]}")
+            return {
+                "status": response.status_code,
+                "text": response.text[:500] if response.text else "Empty response"
+            }
+            
     except Exception as e:
         logger.error(f"Error submitting answer to {submit_url}: {e}")
         return {"error": str(e)}
@@ -152,10 +189,15 @@ def quiz():
         if not quiz_data:
             return jsonify({"error": "Failed to parse quiz content"}), 500
         
+        logger.info(f"Parsed instructions preview: {quiz_data['instructions'][:500]}...")
+        logger.info(f"Submit URL found: {quiz_data['submit_url']}")
+        
         # Step 3: Use AI to solve the quiz
         ai_solution = solve_quiz_with_ai(quiz_data)
         if not ai_solution:
             return jsonify({"error": "AI failed to solve quiz"}), 500
+        
+        logger.info(f"AI solution: {ai_solution}")
         
         # Step 4: Prepare answer payload
         answer_payload = {
@@ -165,12 +207,12 @@ def quiz():
             "answer": ai_solution.get("answer")
         }
         
-        # Add any additional fields the AI might have generated
+        # Add any additional fields from AI solution
         if "additional_fields" in ai_solution:
             answer_payload.update(ai_solution["additional_fields"])
         
         # Step 5: Submit answer
-        submit_url = quiz_data.get("submit_url") or ai_solution.get("submit_url")
+        submit_url = ai_solution.get("submit_url") or quiz_data.get("submit_url")
         if not submit_url:
             return jsonify({"error": "No submit URL found"}), 500
         
@@ -185,12 +227,14 @@ def quiz():
             "status": "completed",
             "submission_result": submission_result,
             "time_elapsed": round(elapsed_time, 2),
-            "quiz_instructions_preview": quiz_data["instructions"][:200] + "..." if len(quiz_data["instructions"]) > 200 else quiz_data["instructions"]
+            "quiz_instructions_preview": quiz_data["instructions"][:200] + "..." if len(quiz_data["instructions"]) > 200 else quiz_data["instructions"],
+            "submit_url_used": submit_url,
+            "answer_submitted": ai_solution.get("answer")
         })
         
     except Exception as e:
         logger.error(f"Unexpected error in quiz endpoint: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route("/")
 def home():
